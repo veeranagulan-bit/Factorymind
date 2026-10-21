@@ -4,13 +4,9 @@ import { useSearchParams } from 'react-router-dom';
 import { 
   Send, 
   Bot, 
-  User, 
   Copy, 
-  RotateCcw, 
-  ThumbsUp, 
   FileText, 
   Search, 
-  ExternalLink, 
   Plus, 
   Sparkles, 
   Check, 
@@ -21,7 +17,9 @@ import {
   ClipboardCheck, 
   Printer, 
   X,
-  AlertTriangle
+  History,
+  Trash2,
+  MessageSquare
 } from 'lucide-react';
 import { cn } from '../../utils/cn';
 
@@ -50,12 +48,102 @@ interface WorkOrder {
   checklist: string[];
 }
 
-const mockHistory = [
-  { id: '1', title: 'Spindle overheating issues', date: 'Today' },
-  { id: '2', title: 'Error E-402 troubleshooting', date: 'Today' },
-  { id: '3', title: 'Coolant mixture ratio', date: 'Yesterday' },
-  { id: '4', title: 'Routine maintenance schedule', date: 'Yesterday' },
-  { id: '5', title: 'Tool wear compensation', date: 'Previous 7 Days' },
+interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: number;
+  timeLabel: string;
+  messages: Message[];
+}
+
+const STORAGE_KEY_CURRENT = 'factorymind_ai_current_chat';
+const STORAGE_KEY_HISTORY = 'factorymind_ai_chat_history';
+const STORAGE_KEY_ACTIVE_ID = 'factorymind_ai_active_session_id';
+
+const initialHistory: ChatSession[] = [
+  {
+    id: 'hist-1',
+    title: 'Spindle Overheating (62.4°C Alert)',
+    createdAt: Date.now() - 3600000,
+    timeLabel: 'Today, 10:45 AM',
+    messages: [
+      {
+        id: 'h1-1',
+        role: 'user',
+        content: 'Diagnose Haas VF-2SS (Unit M-101) spindle temperature rising to 62.4°C and vibration 0.48 mm/s.'
+      },
+      {
+        id: 'h1-2',
+        role: 'assistant',
+        content: `### ⚠️ Critical Spindle Overheating & Bearing Wear
+Spindle bearing temperature (62.4°C) has breached the 55.0°C upper tolerance threshold.
+
+**Root Cause:**
+Chiller coolant return flow rate decreased by 22%, causing thermal starvation at the front angular contact ceramic bearings.
+
+**Immediate Actions:**
+1. Execute feed hold and inspect chiller heat-exchanger fins.
+2. Verify air-oil lubrication mist pressure (**0.35–0.40 MPa**).
+3. Check 48-channel FFT spectrogram at 2,420 Hz for harmonic spalling signature.`,
+        sources: [
+          { id: 'src-1', title: 'Haas_VF2SS_Maintenance_Manual_2024.pdf', page: '42', relevance: 0.96 },
+          { id: 'src-2', title: 'Spindle_Bearing_Troubleshooting_Guide.pdf', page: '18', relevance: 0.91 }
+        ]
+      }
+    ]
+  },
+  {
+    id: 'hist-2',
+    title: 'Alarm E-402 Z-Axis Servo Overload',
+    createdAt: Date.now() - 86400000,
+    timeLabel: 'Yesterday, 3:15 PM',
+    messages: [
+      {
+        id: 'h2-1',
+        role: 'user',
+        content: 'How do I resolve Alarm E-402 on the Okuma Genos M560-V vertical column?'
+      },
+      {
+        id: 'h2-2',
+        role: 'assistant',
+        content: `### 🚨 Alarm 402: Z-Axis Servo Drive Overload Diagnostics
+The servo amplifier has tripped its thermal overload threshold (continuous current > 14.5A for > 3.0s).
+
+**Diagnostic Procedures:**
+1. **Mechanical Inspection:** Inspect telescopic stainless steel way covers for wedged chips binding the vertical ballscrew.
+2. **Pneumatic Counterbalance:** Ensure cylinder pressure reads 4.2 Bar before resetting servo drive breaker.
+3. **Guideway Lubrication:** Verify Mobil Vactra #2 metered oil delivery to Z-axis linear guide trucks.`,
+        sources: [
+          { id: 'src-3', title: 'Z_Axis_Servo_Overload_SOP.pdf', page: '5', relevance: 0.94 }
+        ]
+      }
+    ]
+  },
+  {
+    id: 'hist-3',
+    title: 'Coolant Refractometer Brix Concentration',
+    createdAt: Date.now() - 172800000,
+    timeLabel: '2 Days Ago',
+    messages: [
+      {
+        id: 'h3-1',
+        role: 'user',
+        content: 'What is the recommended Brix refractometer reading for titanium milling coolant?'
+      },
+      {
+        id: 'h3-2',
+        role: 'assistant',
+        content: `### 🧪 Water-Soluble Coolant Concentration
+For titanium (Ti-6Al-4V) and stainless steel aerospace alloys:
+• Maintain **8.5% to 10.5% Brix** concentration.
+• Always add oil concentrate to water (never water to concentrate) to maintain emulsion stability.
+• Check weekly pH levels between 8.8 and 9.4 to prevent bacterial degradation.`,
+        sources: [
+          { id: 'src-4', title: 'Coolant_Refractometer_Calibration_Chart.pdf', page: '12', relevance: 0.88 }
+        ]
+      }
+    ]
+  }
 ];
 
 function FormattedContent({ text }: { text: string }) {
@@ -119,7 +207,38 @@ function renderBold(str: string) {
 
 export default function AiAssistantPage() {
   const [searchParams] = useSearchParams();
-  const [messages, setMessages] = useState<Message[]>([]);
+
+  // Load chat history from localStorage or fallback to initialHistory
+  const [chatHistory, setChatHistory] = useState<ChatSession[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_HISTORY);
+      if (raw) return JSON.parse(raw);
+      localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(initialHistory));
+      return initialHistory;
+    } catch {
+      return initialHistory;
+    }
+  });
+
+  // Active Session ID
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => {
+    return localStorage.getItem(STORAGE_KEY_ACTIVE_ID) || `session_${Date.now()}`;
+  });
+
+  // Persistent Active Messages: Restore from localStorage so changing tabs NEVER loses conversation
+  const [messages, setMessages] = useState<Message[]>(() => {
+    try {
+      const raw = localStorage.getItem(STORAGE_KEY_CURRENT);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+      return [];
+    } catch {
+      return [];
+    }
+  });
+
   const [input, setInput] = useState('');
   const [isTyping, setIsTyping] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -127,10 +246,12 @@ export default function AiAssistantPage() {
   const [isListening, setIsListening] = useState(false);
   const [ttsEnabled, setTtsEnabled] = useState(true);
   const [activeWorkOrder, setActiveWorkOrder] = useState<WorkOrder | null>(null);
-  
+  const [isMobileHistoryOpen, setIsMobileHistoryOpen] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasAutoSubmitted = useRef(false);
 
+  // Auto-scroll on new message
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -138,6 +259,128 @@ export default function AiAssistantPage() {
   useEffect(() => {
     scrollToBottom();
   }, [messages, isTyping]);
+
+  // Synchronize active messages & chat history to localStorage whenever messages change
+  useEffect(() => {
+    if (messages.length > 0) {
+      localStorage.setItem(STORAGE_KEY_CURRENT, JSON.stringify(messages));
+      localStorage.setItem(STORAGE_KEY_ACTIVE_ID, activeSessionId);
+
+      // Automatically sync or update this session in the history list
+      setChatHistory(prev => {
+        const firstUserMsg = messages.find(m => m.role === 'user')?.content || 'CNC Diagnostic Session';
+        const cleanTitle = firstUserMsg.length > 38 ? firstUserMsg.slice(0, 38) + '...' : firstUserMsg;
+
+        const sessionToSave: ChatSession = {
+          id: activeSessionId,
+          title: cleanTitle,
+          createdAt: Date.now(),
+          timeLabel: 'Today, ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          messages: [...messages]
+        };
+
+        const existingIdx = prev.findIndex(s => s.id === activeSessionId);
+        let updated: ChatSession[];
+        if (existingIdx >= 0) {
+          updated = [...prev];
+          updated[existingIdx] = sessionToSave;
+        } else {
+          updated = [sessionToSave, ...prev];
+        }
+        localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(updated));
+        return updated;
+      });
+    }
+  }, [messages, activeSessionId]);
+
+  // Handle "New Chat" button: Saves current conversation and starts fresh
+  const handleNewChat = () => {
+    if (messages.length > 0) {
+      const firstUserMsg = messages.find(m => m.role === 'user')?.content || 'CNC Maintenance Session';
+      const cleanTitle = firstUserMsg.length > 38 ? firstUserMsg.slice(0, 38) + '...' : firstUserMsg;
+
+      const currentToSave: ChatSession = {
+        id: activeSessionId,
+        title: cleanTitle,
+        createdAt: Date.now(),
+        timeLabel: 'Today, ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        messages: [...messages]
+      };
+
+      setChatHistory(prev => {
+        const idx = prev.findIndex(s => s.id === activeSessionId);
+        let updated: ChatSession[];
+        if (idx >= 0) {
+          updated = [...prev];
+          updated[idx] = currentToSave;
+        } else {
+          updated = [currentToSave, ...prev];
+        }
+        localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(updated));
+        return updated;
+      });
+    }
+
+    // Reset view
+    const newSessionId = `session_${Date.now()}`;
+    setActiveSessionId(newSessionId);
+    setMessages([]);
+    localStorage.removeItem(STORAGE_KEY_CURRENT);
+    localStorage.setItem(STORAGE_KEY_ACTIVE_ID, newSessionId);
+    setIsMobileHistoryOpen(false);
+  };
+
+  // Switch to a previous conversation from history
+  const handleSelectSession = (session: ChatSession) => {
+    // If current conversation is unsaved, save it
+    if (messages.length > 0 && activeSessionId !== session.id) {
+      const firstUserMsg = messages.find(m => m.role === 'user')?.content || 'CNC Maintenance Session';
+      const cleanTitle = firstUserMsg.length > 38 ? firstUserMsg.slice(0, 38) + '...' : firstUserMsg;
+      const currentToSave: ChatSession = {
+        id: activeSessionId,
+        title: cleanTitle,
+        createdAt: Date.now(),
+        timeLabel: 'Today',
+        messages: [...messages]
+      };
+      setChatHistory(prev => {
+        const idx = prev.findIndex(s => s.id === activeSessionId);
+        let updated: ChatSession[];
+        if (idx >= 0) {
+          updated = [...prev];
+          updated[idx] = currentToSave;
+        } else {
+          updated = [currentToSave, ...prev];
+        }
+        localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(updated));
+        return updated;
+      });
+    }
+
+    setActiveSessionId(session.id);
+    setMessages(session.messages);
+    localStorage.setItem(STORAGE_KEY_CURRENT, JSON.stringify(session.messages));
+    localStorage.setItem(STORAGE_KEY_ACTIVE_ID, session.id);
+    setIsMobileHistoryOpen(false);
+  };
+
+  // Delete a conversation from history
+  const handleDeleteSession = (sessionId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setChatHistory(prev => {
+      const updated = prev.filter(s => s.id !== sessionId);
+      localStorage.setItem(STORAGE_KEY_HISTORY, JSON.stringify(updated));
+      return updated;
+    });
+
+    if (activeSessionId === sessionId) {
+      setMessages([]);
+      localStorage.removeItem(STORAGE_KEY_CURRENT);
+      const newId = `session_${Date.now()}`;
+      setActiveSessionId(newId);
+      localStorage.setItem(STORAGE_KEY_ACTIVE_ID, newId);
+    }
+  };
 
   const toggleMute = () => {
     if (typeof window !== 'undefined' && window.speechSynthesis) {
@@ -228,15 +471,19 @@ export default function AiAssistantPage() {
       machine: isSpindle ? 'Haas VF-2SS (Unit M-101)' : isServo ? 'Mazak Integrex i-200 (Unit M-102)' : 'DMG MORI DMU 50 (Unit M-104)',
       component: isSpindle ? 'High-Speed Spindle Cartridge' : isServo ? 'Z-Axis Servo Amplifier & Ballscrew' : 'Coolant Delivery & Chiller Pump',
       priority: isSpindle || isServo ? 'Critical' : 'High',
-      diagnosis: content.split('\n')[0].replace('###', '').trim(),
-      requiredParts: isSpindle 
-        ? ['SKF 7014 Angular Contact Bearings (Pair)', 'Viton Quad-Ring Seals #VR-42', 'Mobil Velocite No. 6 Spindle Oil']
+      diagnosis: isSpindle 
+        ? 'Spindle thermal gradient exceeded 55.0°C threshold. Front angular contact bearing acoustic spalling detected at 2,420 Hz.' 
         : isServo
-        ? ['Z-Axis Ball Nut Wiper Set #BW-88', 'Fanuc Alpha i Servo Module A06B', 'Way Lube ISO VG 68']
-        : ['Refractometer Calibrated Lens #RF-01', 'Tramp Oil Poly Coalescing Filter', 'Coolant Sump Biocide Concentrate'],
+        ? 'Alarm E-402: Z-Axis Servo Drive Overload trip. Telescopic wipers binding against guideway.'
+        : 'Coolant flow degradation. Filter particulate saturation causing pump cavitation.',
+      requiredParts: isSpindle 
+        ? ['Front Hybrid Ceramic Spindle Bearing Set (7014C)', 'Air-Oil Mist Metering Nozzle', 'Synthetic Spindle Chiller Glycol (10L)'] 
+        : isServo
+        ? ['Z-Axis Servo Drive Contactor Module', 'Ballscrew Wiper Seal Assembly', 'Mobil Vactra #2 Way Lubricant (5L)']
+        : ['Water-Soluble Coolant Concentrate', 'Optical Refractometer Brix Standard', 'High-Pressure Inline Mesh Filter (50μm)'],
       checklist: [
-        'Engage Lockout / Tagout (LOTO) on Main CNC Breaker',
-        'Verify hydraulic / pneumatic lines are depressurized',
+        'Perform complete Lockout / Tagout (LOTO) on main 480V disconnect',
+        'Drain and flush auxiliary chiller recirculation loop',
         'Inspect mechanical travel limits and wipe guideways',
         'Calibrate temperature / current sensor thresholds',
         'Perform 10-minute dry-run test under 25% rapid override'
@@ -318,89 +565,64 @@ Spindle temperatures exceeding normal operating bounds (typically > 55°C–60°
 
 2. **Air-Oil Lubrication Mist**:
    • Inspect the oil-air pressure regulator. Pressure must read between **0.35–0.40 MPa**.
-   • Check the lubrication reservoir level and verify no contamination or bubbles in the delivery line.
+   • Verify that drop frequency is calibrated to 1 drop every 8–10 minutes.
 
-3. **Bearing Preload & Mechanical Friction**:
-   • Perform an unloaded idle test at 1,000 RPM. If temperature spikes rapidly without cutting load, spindle bearings require preload adjustment or replacement.
+3. **Bearing Acoustic Health**:
+   • Check the 48-channel FFT acoustic spectrum. A harmonic spike around **2.4 kHz** indicates ball pass frequency outer race (BPFO) defect on the front bearings.
 
-4. **Tool Taper Cleanliness**:
-   • Clean the spindle taper and tool holder shank with an approved lint-free wiper to remove fine chips.
-
-*Recommended action*: Safely pause high-RPM cycles until chiller temperature stabilizes.`;
+*References: Haas VF-2SS Maintenance Manual (Sec. 5.3) & Spindle Bearing Troubleshooting SOP (Page 18).*`;
         responseSources = [
-          { id: 's1', title: 'CNC Milling Machine Maintenance Manual', page: '42', relevance: 0.94 },
-          { id: 's2', title: 'Spindle Troubleshooting Procedure', page: '18', relevance: 0.88 },
+          { id: '1', title: 'Haas_VF2SS_Maintenance_Manual_2024.pdf', page: '42', relevance: 0.95 },
+          { id: '2', title: 'Spindle_Bearing_Troubleshooting_Guide.pdf', page: '18', relevance: 0.89 }
         ];
-      } else if (raw.includes('e-402') || raw.includes('402') || raw.includes('servo') || raw.includes('overload')) {
-        responseContent = `### 🚨 Error E-402: Z-Axis Servo Drive Overload
+      } else if (raw.includes('402') || raw.includes('e-402') || raw.includes('overload') || raw.includes('servo')) {
+        responseContent = `### 🚨 Alarm 402 / E-402: Z-Axis Servo Drive Overload
 
-Error code **E-402** indicates that the Z-axis servo drive has drawn current above its rated thermal safety limit.
+Alarm 402 signifies that the Z-axis servo drive current exceeded the thermal trip threshold (continuous current > 14.5A for > 3.0s).
 
 **Step-by-Step Resolution:**
-1. **Inspect for Mechanical Binding**:
-   • Safely halt the machine and lock out power.
-   • Check the Z-axis telescoping way covers for metal chips wedged between wipers.
-   • Inspect the Z-axis ballscrew and linear guideway lubrication lines for blockages.
+1. **Clear Mechanical Binding:** Inspect telescopic stainless steel way covers on the vertical column. Clear any jammed metal chips creating friction.
+2. **Pneumatic Counterbalance:** Verify that the cylinder pressure is holding at **4.2 Bar**. If pressure is low, the servo motor carries full headstock weight.
+3. **Guideway Lubrication Film:** Inspect the automatic oil metering valves to ensure Mobil Vactra #2 is reaching all 4 linear guide trucks.
+4. **Reset Breaker:** Allow the amplifier heat sink to cool for 5 minutes before pressing RESET on the CNC controller.
 
-2. **Verify Tooling & Cutting Load**:
-   • Confirm that tool feed rate (mm/min) and plunge angle do not exceed maximum motor torque for the workpiece material.
-
-3. **Check Electromagnetic Holding Brake**:
-   • Ensure the 24V DC holding brake on the vertical column servo motor is disengaging cleanly when the drive enables.
-
-4. **Clear and Reset**:
-   • Clear debris, allow the servo amplifier to cool down for 5 minutes, and perform an axis reset from the CNC controller panel.`;
+*References: Z_Axis_Servo_Overload_SOP (Sec. 4.1) & Fanuc 31i Error Codes (Page 88).*`;
         responseSources = [
-          { id: 'e1', title: 'Error Codes Reference Guide', page: '112', relevance: 0.98 },
-          { id: 'e2', title: 'Axis Drive Maintenance SOP', page: '5', relevance: 0.76 },
+          { id: '3', title: 'Z_Axis_Servo_Overload_SOP.pdf', page: '5', relevance: 0.98 },
+          { id: '4', title: 'Fanuc_31i_Error_Codes_Reference.pdf', page: '88', relevance: 0.92 }
         ];
-      } else if (raw.includes('coolant') || raw.includes('mixture') || raw.includes('ratio') || raw.includes('refractometer')) {
-        responseContent = `### 💧 Coolant Mixture & Concentration Standards
+      } else if (raw.includes('coolant') || raw.includes('brix') || raw.includes('mixture') || raw.includes('refractometer')) {
+        responseContent = `### 💧 Coolant Concentration & Refractometer Guidelines
 
-Maintaining the correct water-soluble coolant ratio ensures tool longevity, superior surface finish, and machine rust prevention:
+Maintaining correct water-soluble coolant concentration protects cutting tools, prevents workpiece corrosion, and eliminates bacterial rancidity.
 
-• **General Milling (Mild & Alloy Steels)**: **8% to 10%** concentration
-• **Aluminum & Non-Ferrous Alloys**: **6% to 8%** concentration
-• **Heavy-Duty Tapping / Stainless Steel (304/316)**: **10% to 12%** concentration
+**Target Concentration Ratios:**
+• **General Machining (Carbon & Alloy Steels):** 6.0% – 8.0% Brix (Refractometer factor 1.0)
+• **Heavy Roughing & Titanium (Ti-6Al-4V):** 8.5% – 10.5% Brix
+• **Aluminum & Non-Ferrous Alloys:** 5.0% – 7.0% Brix
 
-**Key Best Practices:**
-1. **Always use a Refractometer**: Never guess concentration by color or smell alone. Apply a refractive index multiplier according to your coolant manufacturer's data sheet.
-2. **Mixing Order**: Always add **OIL INTO WATER** (never water into oil) while agitating to form a stable emulsion.
-3. **Tramp Oil Skimming**: Skim surface tramp oils daily to prevent anaerobic bacterial growth and rancid odors.`;
+**Maintenance Rules:**
+1. Always add coolant concentrate to water (OIL TO WATER), never water into oil.
+2. Check concentration daily using an optical or digital refractometer before the first shift.
+3. Maintain sump tramp-oil skimmers to preserve aerobic fluid conditions.`;
         responseSources = [
-          { id: 'c1', title: 'Coolant Management Best Practices', page: '12', relevance: 0.92 },
-          { id: 'c2', title: 'Daily Maintenance Checklist', page: '2', relevance: 0.85 },
-        ];
-      } else if (raw.includes('tool') || raw.includes('wear') || raw.includes('offset')) {
-        responseContent = `### 🔧 Tool Wear Compensation & Offset Management
-
-To calibrate and compensate for progressive tool wear without altering your CAM program:
-
-1. **Measure Critical Dimensions**:
-   • Inspect the finished workpiece feature using a calibrated micrometer or height gauge.
-   • Calculate wear delta: **Deviation = Actual Dimension - Nominal Print Spec**.
-
-2. **Update the CNC Wear Table**:
-   • Navigate to the **Tool Offsets > Wear** page on your controller.
-   • Enter the wear offset into the **Wear Column** for the active tool number (do not modify Geometry offset).
-
-3. **Flank Wear Threshold**:
-   • If insert flank wear exceeds **0.30 mm** or edge chipping is visible under magnification, index or replace the carbide insert immediately.`;
-        responseSources = [
-          { id: 't1', title: 'Operator Training Manual', page: '67', relevance: 0.95 },
+          { id: '5', title: 'Coolant_Refractometer_Calibration_Chart.pdf', page: '12', relevance: 0.94 }
         ];
       } else {
-        responseContent = `I understand your question regarding **"${text}"**.
+        responseContent = `### 📋 Technical Diagnostic Analysis
 
-Here is what the standard operating procedure recommends for this scenario:
+Regarding your inquiry on **"${text.trim()}"**:
 
-1. **Safety First**: Verify that the CNC controller is in a safe state ('Feed Hold' or 'Manual Mode') before performing physical inspections.
-2. **Telemetry & Calibration**: Check the controller monitor for any related drive or sensor alarms that may coincide with this issue.
-3. **Documentation Cross-Reference**: Consult the OEM maintenance schedule for recommended service intervals and torque specifications.
+1. **Operating Parameters**:
+   Verify that all axis servo drives and auxiliary hydraulic units are operating within nominal thermal tolerances ($T < 45^\circ\\text{C}$, vibration RMS $< 0.15\\text{ mm/s}$).
 
-Could you provide more context, such as the specific machine model (e.g., Haas VF-2SS or Mazak) or any exact alarm codes on the display?`;
+2. **Preventive Verification**:
+   Inspect telemetry sensors, lubricant reservoirs, and air pressure regulators (**0.6 MPa** line supply).
+
+3. **Next Steps**:
+   If symptoms persist, execute a controlled spindle stop and review controller event logs. You can also generate an automated maintenance work order below for technician sign-off.`;
         responseSources = [
-          { id: 'g1', title: 'General Operations Manual', page: '15', relevance: 0.65 },
+          { id: '6', title: 'Haas_VF2SS_Maintenance_Manual_2024.pdf', page: '12', relevance: 0.82 }
         ];
       }
 
@@ -422,6 +644,7 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
     executeSend(input);
   };
 
+  // Handle URL query trigger (e.g. from Fleet page "Diagnose with AI Co-Pilot")
   useEffect(() => {
     const q = searchParams.get('q');
     if (q && !hasAutoSubmitted.current) {
@@ -433,45 +656,165 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
   return (
     <div className="flex h-[calc(100vh-7rem)] sm:h-[calc(100vh-7.5rem)] -m-4 sm:-m-6 md:-m-8 bg-bg-base overflow-hidden relative font-sans text-zinc-900">
       
-      {/* History Sidebar (Laptop/Desktop only) */}
-      <div className="w-64 border-r border-black/[0.06] bg-white/70 backdrop-blur-md flex-col hidden lg:flex relative z-10 shrink-0">
-        <div className="p-4">
+      {/* ================= HISTORY SIDEBAR (DESKTOP & LAPTOP) ================= */}
+      <div className="w-72 border-r border-black/[0.06] bg-white/70 backdrop-blur-md flex-col hidden lg:flex relative z-10 shrink-0">
+        <div className="p-4 border-b border-black/[0.06] space-y-2">
           <button 
-            onClick={() => setMessages([])}
-            className="w-full flex items-center justify-center gap-2 rounded-full bg-[#1a1a1a] hover:bg-black px-4 py-2.5 text-xs font-medium text-white transition-all shadow-xs"
+            onClick={handleNewChat}
+            className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#1a1a1a] hover:bg-black px-4 py-2.5 text-xs font-semibold text-white transition-all shadow-xs group"
           >
-            <Plus className="h-3.5 w-3.5" />
-            New Conversation
+            <Plus className="h-4 w-4 text-[#9fff00] group-hover:scale-110 transition-transform" />
+            <span>+ New Conversation</span>
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-3 py-2">
-          <div className="space-y-6">
-            {['Today', 'Yesterday', 'Previous 7 Days'].map(group => (
-              <div key={group}>
-                <h3 className="px-3 text-[10px] font-semibold text-zinc-400 uppercase tracking-wider mb-2">
-                  {group}
-                </h3>
-                <div className="space-y-1">
-                  {mockHistory.filter(h => h.date === group).map(item => (
-                    <button 
-                      key={item.id}
-                      onClick={() => executeSend(item.title)}
-                      className="w-full text-left px-3 py-2 rounded-lg text-xs text-zinc-600 hover:bg-black/[0.04] hover:text-[#1a1a1a] truncate transition-colors"
-                    >
-                      {item.title}
-                    </button>
-                  ))}
+
+        <div className="flex-1 overflow-y-auto px-3 py-3 space-y-4">
+          <div className="flex items-center justify-between px-2 text-[10px] font-bold text-zinc-400 uppercase tracking-wider">
+            <span className="flex items-center gap-1.5">
+              <History className="h-3 w-3" /> Saved Conversations ({chatHistory.length})
+            </span>
+          </div>
+
+          <div className="space-y-1.5">
+            {chatHistory.map((session) => {
+              const isActive = activeSessionId === session.id;
+              return (
+                <div
+                  key={session.id}
+                  onClick={() => handleSelectSession(session)}
+                  className={cn(
+                    "w-full text-left p-2.5 rounded-xl text-xs transition-all cursor-pointer group flex items-start justify-between gap-2 border",
+                    isActive 
+                      ? "bg-white border-black/15 shadow-xs font-semibold text-zinc-900" 
+                      : "border-transparent text-zinc-600 hover:bg-black/[0.04] hover:text-[#1a1a1a]"
+                  )}
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-1.5">
+                      <MessageSquare className={cn("h-3 w-3 shrink-0", isActive ? "text-[#1a1a1a]" : "text-zinc-400")} />
+                      <span className="truncate block font-medium">{session.title}</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] text-zinc-400 mt-1 pl-4.5 font-mono">
+                      <span>{session.timeLabel}</span>
+                      <span>•</span>
+                      <span>{session.messages.length} msgs</span>
+                    </div>
+                  </div>
+
+                  {/* Delete conversation button */}
+                  <button
+                    onClick={(e) => handleDeleteSession(session.id, e)}
+                    className="opacity-0 group-hover:opacity-100 p-1 hover:text-red-600 rounded transition-opacity"
+                    title="Delete conversation"
+                  >
+                    <Trash2 className="h-3.5 w-3.5 text-zinc-400 hover:text-red-600" />
+                  </button>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       </div>
 
+      {/* ================= MOBILE SLIDE-OVER HISTORY DRAWER ================= */}
+      <AnimatePresence>
+        {isMobileHistoryOpen && (
+          <div className="fixed inset-0 z-50 flex lg:hidden">
+            <div 
+              className="absolute inset-0 bg-black/40 backdrop-blur-xs" 
+              onClick={() => setIsMobileHistoryOpen(false)} 
+            />
+            <motion.div 
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className="relative w-72 max-w-[80vw] h-full bg-white shadow-2xl flex flex-col z-10 border-r border-black/10"
+            >
+              <div className="p-4 border-b border-black/[0.06] flex items-center justify-between">
+                <span className="font-['Outfit'] font-bold text-sm text-zinc-900 flex items-center gap-1.5">
+                  <History className="h-4 w-4" /> Chat History
+                </span>
+                <button 
+                  onClick={() => setIsMobileHistoryOpen(false)}
+                  className="p-1 rounded-md text-zinc-400 hover:text-black"
+                >
+                  <X className="h-5 w-5" />
+                </button>
+              </div>
+
+              <div className="p-3 border-b border-black/[0.06]">
+                <button 
+                  onClick={handleNewChat}
+                  className="w-full flex items-center justify-center gap-2 rounded-xl bg-[#1a1a1a] text-white px-4 py-2.5 text-xs font-semibold shadow-xs"
+                >
+                  <Plus className="h-4 w-4 text-[#9fff00]" />
+                  <span>+ New Conversation</span>
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-3 space-y-1.5">
+                {chatHistory.map((session) => (
+                  <div
+                    key={session.id}
+                    onClick={() => handleSelectSession(session)}
+                    className={cn(
+                      "w-full text-left p-2.5 rounded-xl text-xs transition-all cursor-pointer flex items-start justify-between gap-2 border",
+                      activeSessionId === session.id 
+                        ? "bg-zinc-100 border-black/15 font-semibold text-zinc-900" 
+                        : "border-transparent text-zinc-600 hover:bg-zinc-50"
+                    )}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <MessageSquare className="h-3 w-3 text-zinc-500 shrink-0" />
+                        <span className="truncate block font-medium">{session.title}</span>
+                      </div>
+                      <span className="text-[10px] text-zinc-400 block mt-1 pl-4.5 font-mono">
+                        {session.timeLabel} • {session.messages.length} msgs
+                      </span>
+                    </div>
+                    <button
+                      onClick={(e) => handleDeleteSession(session.id, e)}
+                      className="p-1 text-zinc-400 hover:text-red-600"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* ================= MAIN CHAT CONTENT AREA ================= */}
       {messages.length === 0 ? (
-        /* ================= EMPTY STATE (PHONE & LAPTOP RATIO OPTIMIZED) ================= */
+        /* ================= EMPTY STATE ================= */
         <div className="flex-1 flex flex-col items-center justify-center relative z-10 w-full px-4 sm:px-6 overflow-y-auto py-8">
-          <div className="max-w-2xl w-full mx-auto text-center">
+          
+          {/* Mobile top toolbar in empty state */}
+          <div className="lg:hidden absolute top-3 left-4 right-4 flex items-center justify-between">
+            <button
+              onClick={() => setIsMobileHistoryOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/90 border border-black/10 text-xs font-semibold text-zinc-700 shadow-2xs"
+            >
+              <History className="h-3.5 w-3.5" />
+              <span>History ({chatHistory.length})</span>
+            </button>
+            <button
+              onClick={toggleMute}
+              className={cn(
+                "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold border shadow-2xs",
+                ttsEnabled ? "bg-emerald-50 text-emerald-800 border-emerald-200" : "bg-red-50 text-red-600 border-red-200"
+              )}
+            >
+              {ttsEnabled ? <Volume2 className="h-3.5 w-3.5 text-emerald-600" /> : <VolumeX className="h-3.5 w-3.5 text-red-600" />}
+              <span>{ttsEnabled ? "Voice ON" : "MUTED"}</span>
+            </button>
+          </div>
+
+          <div className="max-w-2xl w-full mx-auto text-center mt-6 lg:mt-0">
             {/* Header Animation */}
             <motion.h1 
               initial={{ opacity: 0, y: 15 }} 
@@ -482,7 +825,6 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
               <span>Instant knowledge & diagnostics</span>
               <br />
               <span className="text-[#8e8e8e]">for your </span>
-              {/* Eye Icon Pill UI Element */}
               <span className="w-[32px] sm:w-[44px] md:w-[50px] h-[20px] sm:h-[26px] md:h-[28px] border-[2px] border-[#1a1a1a] rounded-full inline-flex items-center justify-center align-middle mx-1 sm:mx-1.5 bg-transparent">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#1a1a1a]" />
               </span>
@@ -502,14 +844,14 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
               >
                 <Search className="h-4 w-4 text-zinc-400 shrink-0" />
                 <input 
-                  type="text"
+                  type="text" 
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Ask me anything (or tap mic to speak)..." 
-                  className="flex-1 bg-transparent border-none text-zinc-900 placeholder:text-zinc-400 focus:outline-none text-xs sm:text-sm py-2"
+                  className="flex-1 bg-transparent border-none text-zinc-900 placeholder:text-zinc-400 focus:outline-hidden text-xs sm:text-sm py-2"
                 />
 
-                {/* Hands-Free Voice Mode Mic Button */}
+                {/* Voice Mode Mic Button */}
                 <button
                   type="button"
                   onClick={toggleListening}
@@ -560,16 +902,26 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
       ) : (
         /* ================= ACTIVE CHAT STATE ================= */
         <div className="flex-1 flex flex-col relative z-10 w-full h-full">
-          {/* Chat Header */}
-          <div className="h-12 sm:h-14 border-b border-black/[0.06] flex items-center justify-between px-4 sm:px-6 bg-white/80 backdrop-blur-md absolute top-0 left-0 right-0 z-20">
+          {/* Top Bar with History & Controls */}
+          <div className="h-12 sm:h-14 border-b border-black/[0.06] flex items-center justify-between px-3 sm:px-6 bg-white/80 backdrop-blur-md absolute top-0 left-0 right-0 z-20">
             <div className="flex items-center gap-2">
-              <span className="text-xs font-semibold text-zinc-800">Diagnostic Session</span>
+              {/* Mobile history toggle */}
+              <button
+                onClick={() => setIsMobileHistoryOpen(true)}
+                className="lg:hidden flex items-center gap-1 px-2.5 py-1 rounded-full bg-zinc-100 hover:bg-zinc-200 text-xs font-semibold text-zinc-800 transition-colors"
+                title="View Chat History"
+              >
+                <History className="h-3.5 w-3.5" />
+                <span className="text-[11px]">History</span>
+              </button>
+
+              <span className="text-xs font-semibold text-zinc-800 hidden sm:inline">Diagnostic Session</span>
               <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-[#9fff00]/25 text-black border border-[#9fff00]/40 flex items-center gap-1">
                 <Sparkles className="h-2.5 w-2.5" /> SLM Live
               </span>
             </div>
             
-            {/* Action controls: Speaker audio toggle & new chat */}
+            {/* Action controls: Voice ON/MUTED and New Conversation */}
             <div className="flex items-center gap-2">
               <button 
                 onClick={toggleMute}
@@ -584,12 +936,14 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                 {ttsEnabled ? <Volume2 className="h-3.5 w-3.5 text-emerald-600" /> : <VolumeX className="h-3.5 w-3.5 text-red-600" />}
                 <span>{ttsEnabled ? "Voice ON" : "MUTED"}</span>
               </button>
+
               <button 
-                onClick={() => setMessages([])} 
-                className="text-xs text-zinc-500 hover:text-black lg:hidden p-1.5"
-                title="Clear chat"
+                onClick={handleNewChat}
+                className="flex items-center gap-1 px-3 py-1 rounded-full bg-[#1a1a1a] hover:bg-black text-white text-xs font-semibold transition-all shadow-xs"
+                title="Save current chat and start new conversation"
               >
-                <Plus className="h-4 w-4" />
+                <Plus className="h-3.5 w-3.5 text-[#9fff00]" />
+                <span className="hidden sm:inline">New Chat</span>
               </button>
             </div>
           </div>
@@ -606,7 +960,7 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                   )}
                 >
                   {message.role === 'assistant' && (
-                    <div className="flex h-7 w-7 sm:h-8 sm:w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#1a1a1a] text-white mt-0.5">
+                    <div className="flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-full bg-[#1a1a1a] text-white mt-0.5">
                       <Bot className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                     </div>
                   )}
@@ -618,8 +972,8 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                     <div className={cn(
                       "px-4 sm:px-5 py-3 sm:py-4 rounded-2xl shadow-xs",
                       message.role === 'user' 
-                        ? 'bg-[#1a1a1a] text-white rounded-tr-sm text-xs sm:text-sm' 
-                        : 'bg-white border border-black/[0.06] text-zinc-900 rounded-tl-sm'
+                        ? 'bg-[#1a1a1a] text-white rounded-tr-xs text-xs sm:text-sm' 
+                        : 'bg-white border border-black/[0.06] text-zinc-900 rounded-tl-xs'
                     )}>
                       {message.role === 'assistant' ? (
                         <FormattedContent text={message.content} />
@@ -642,41 +996,25 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                         <div className="flex items-center gap-1 text-zinc-400">
                           <button 
                             onClick={() => handleCopy(message.id, message.content)}
-                            className="p-1 rounded hover:text-black transition-colors" 
+                            className="p-1 rounded-sm hover:text-black transition-colors" 
                             title="Copy"
                           >
                             {copiedId === message.id ? <Check className="h-3 w-3 text-emerald-600" /> : <Copy className="h-3 w-3" />}
-                          </button>
-                          <button 
-                            onClick={() => executeSend(messages[messages.length - 2]?.content || 'spindle')}
-                            className="p-1 rounded hover:text-black transition-colors" 
-                            title="Regenerate"
-                          >
-                            <RotateCcw className="h-3 w-3" />
-                          </button>
-                          <button className="p-1 rounded hover:text-emerald-600 transition-colors" title="Helpful">
-                            <ThumbsUp className="h-3 w-3" />
                           </button>
                         </div>
                       </div>
                     )}
                   </div>
-
-                  {message.role === 'user' && (
-                    <div className="flex h-7 w-7 sm:h-8 sm:w-8 flex-shrink-0 items-center justify-center rounded-full bg-white border border-black/[0.08] text-zinc-700 mt-0.5">
-                      <User className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
-                    </div>
-                  )}
                 </div>
               ))}
-              
+
               {isTyping && (
                 <div className="flex gap-3 justify-start">
-                  <div className="flex h-7 w-7 sm:h-8 sm:w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#1a1a1a] text-white">
-                    <Bot className="h-3.5 w-3.5" />
+                  <div className="flex h-7 w-7 sm:h-8 sm:w-8 shrink-0 items-center justify-center rounded-full bg-[#1a1a1a] text-white mt-0.5">
+                    <Bot className="h-3.5 w-3.5 sm:h-4 sm:w-4" />
                   </div>
-                  <div className="bg-white border border-black/[0.06] px-4 py-3 rounded-2xl rounded-tl-sm flex items-center gap-1.5 shadow-xs">
-                    <motion.div className="h-1.5 w-1.5 rounded-full bg-zinc-400" animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0 }} />
+                  <div className="bg-white border border-black/[0.06] rounded-2xl rounded-tl-xs px-4 py-3 shadow-xs flex items-center gap-1.5">
+                    <motion.div className="h-1.5 w-1.5 rounded-full bg-zinc-400" animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.6 }} />
                     <motion.div className="h-1.5 w-1.5 rounded-full bg-zinc-400" animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0.2 }} />
                     <motion.div className="h-1.5 w-1.5 rounded-full bg-zinc-400" animate={{ y: [0, -4, 0] }} transition={{ repeat: Infinity, duration: 0.6, delay: 0.4 }} />
                   </div>
@@ -686,7 +1024,7 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
              </div>
           </div>
 
-          {/* Active Chat Input Area (Phone & Laptop responsive) */}
+          {/* Active Chat Input Area */}
           <div className="absolute bottom-0 left-0 right-0 p-3 sm:p-6 z-20">
             <div className="absolute inset-0 bg-gradient-to-t from-bg-base via-bg-base/95 to-transparent -z-10 pointer-events-none h-[150%] -top-[50%]" />
             <div className="max-w-3xl mx-auto relative z-10">
@@ -695,11 +1033,11 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                 className="bg-white rounded-[10px] sm:rounded-full border border-black/[0.08] p-1.5 pl-3 sm:pl-5 flex items-center shadow-lg hover:border-black/[0.18] transition-colors gap-1.5 sm:gap-2"
               >
                 <input 
-                  type="text"
+                  type="text" 
                   value={input}
                   onChange={(e) => setInput(e.target.value)}
                   placeholder="Ask a question or speak..." 
-                  className="flex-1 bg-transparent border-none text-zinc-900 placeholder:text-zinc-400 focus:outline-none text-xs sm:text-sm py-1.5 sm:py-2"
+                  className="flex-1 bg-transparent border-none text-zinc-900 placeholder:text-zinc-400 focus:outline-hidden text-xs sm:text-sm py-1.5 sm:py-2"
                 />
 
                 {/* Voice Input Mic Button */}
@@ -728,7 +1066,7 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
         </div>
       )}
 
-      {/* Sources Sidebar (Desktop/Laptop: lg and above) */}
+      {/* Sources Sidebar (Desktop: xl and above) */}
       {messages.length > 0 && messages[messages.length - 1]?.sources && messages[messages.length - 1]?.sources!.length > 0 && (
         <div className="w-80 border-l border-black/[0.06] bg-white/70 backdrop-blur-md flex-col hidden xl:flex relative z-10 shrink-0">
           <div className="h-14 border-b border-black/[0.06] flex items-center px-4 bg-white/60">
@@ -759,8 +1097,9 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                 <h3 className="text-xs font-semibold text-zinc-900 mb-2 leading-snug group-hover:text-black transition-colors">
                   {source.title}
                 </h3>
-                <div className="flex items-center gap-1 text-[11px] font-medium text-zinc-500 group-hover:text-black transition-colors">
-                  View Source Details <ExternalLink className="h-2.5 w-2.5" />
+                <div className="flex items-center gap-1 text-[11px] text-zinc-500 group-hover:text-zinc-900 font-medium">
+                  <span>View Verified Excerpt</span>
+                  <span className="text-zinc-400 group-hover:translate-x-0.5 transition-transform">→</span>
                 </div>
               </motion.div>
             ))}
@@ -768,82 +1107,82 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
         </div>
       )}
 
-      {/* Feature 4: Printable / Exportable Official Work Order Modal */}
+      {/* Work Order Modal */}
       <AnimatePresence>
         {activeWorkOrder && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6 overflow-y-auto">
-            <div className="fixed inset-0 bg-black/50 backdrop-blur-xs" onClick={() => setActiveWorkOrder(null)} />
-            
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-6">
+            <div className="absolute inset-0 bg-black/40 backdrop-blur-xs" onClick={() => setActiveWorkOrder(null)} />
             <motion.div 
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="relative w-full max-w-2xl bg-white border border-black/[0.08] rounded-2xl shadow-2xl overflow-hidden flex flex-col my-auto max-h-[90vh]"
+              initial={{ opacity: 0, scale: 0.95, y: 10 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 10 }}
+              className="relative w-full max-w-2xl bg-white border border-black/[0.08] rounded-2xl shadow-2xl overflow-hidden flex flex-col max-h-[90vh]"
             >
-              {/* Header Bar */}
-              <div className="p-4 sm:p-5 border-b border-black/[0.06] flex items-center justify-between bg-zinc-50">
-                <div className="flex items-center gap-2">
-                  <ClipboardCheck className="h-5 w-5 text-zinc-900" />
+              {/* Modal Header */}
+              <div className="p-4 sm:p-6 border-b border-black/[0.06] flex items-center justify-between bg-zinc-50/50">
+                <div className="flex items-center gap-2.5">
+                  <div className="h-8 w-8 rounded-lg bg-[#1a1a1a] text-white flex items-center justify-center">
+                    <ClipboardCheck className="h-4 w-4 text-[#9fff00]" />
+                  </div>
                   <div>
-                    <h2 className="font-['Outfit'] font-bold text-base sm:text-lg text-zinc-900 leading-tight">
-                      FactoryMind Maintenance Work Order
+                    <h2 className="font-['Outfit'] font-bold text-sm sm:text-base text-zinc-900">
+                      Standardized Maintenance Work Order
                     </h2>
-                    <p className="text-[11px] text-zinc-500">{activeWorkOrder.id} • Issued: {activeWorkOrder.date}</p>
+                    <span className="text-[11px] text-zinc-500 font-mono">
+                      Doc Ref: {activeWorkOrder.id} • {activeWorkOrder.date}
+                    </span>
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <button
-                    onClick={() => window.print()}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-[#1a1a1a] hover:bg-black text-white text-xs font-medium transition-colors shadow-xs"
+                  <button 
+                    onClick={() => window.print()} 
+                    className="p-1.5 rounded-lg border border-black/10 hover:bg-zinc-100 text-zinc-600 transition-colors"
+                    title="Print Work Order"
                   >
-                    <Printer className="h-3 w-3" />
-                    <span className="hidden sm:inline">Print / Save PDF</span>
+                    <Printer className="h-4 w-4" />
                   </button>
-                  <button
+                  <button 
                     onClick={() => setActiveWorkOrder(null)}
-                    className="p-1 rounded-md text-zinc-400 hover:text-black"
+                    className="p-1.5 rounded-lg border border-black/10 hover:bg-zinc-100 text-zinc-600 transition-colors"
                   >
-                    <X className="h-5 w-5" />
+                    <X className="h-4 w-4" />
                   </button>
                 </div>
               </div>
 
-              {/* Work Order Document Body */}
-              <div className="p-5 sm:p-8 overflow-y-auto space-y-6 text-xs sm:text-sm text-zinc-800">
-                {/* Equipment & Severity Banner */}
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 p-3.5 bg-zinc-50 rounded-xl border border-black/[0.05]">
+              {/* Work Order Body */}
+              <div className="p-4 sm:p-6 overflow-y-auto space-y-5 text-xs sm:text-sm">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 p-3.5 bg-zinc-50 rounded-xl border border-black/[0.04]">
                   <div>
-                    <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Target Machine</span>
-                    <span className="font-semibold text-zinc-900">{activeWorkOrder.machine}</span>
+                    <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider block">Machine Unit</span>
+                    <span className="font-bold text-zinc-900">{activeWorkOrder.machine}</span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Sub-Assembly</span>
-                    <span className="font-semibold text-zinc-900">{activeWorkOrder.component}</span>
+                    <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider block">Target Assembly</span>
+                    <span className="font-bold text-zinc-900">{activeWorkOrder.component}</span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-zinc-400 uppercase font-semibold block">Dispatch Urgency</span>
-                    <span className="inline-flex items-center gap-1 font-semibold text-red-600">
-                      <AlertTriangle className="h-3.5 w-3.5" /> {activeWorkOrder.priority}
+                    <span className="text-[10px] text-zinc-400 font-medium uppercase tracking-wider block">Urgency Level</span>
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-bold mt-0.5 ${
+                      activeWorkOrder.priority === 'Critical' ? 'bg-red-100 text-red-800' : 'bg-amber-100 text-amber-800'
+                    }`}>
+                      {activeWorkOrder.priority}
                     </span>
                   </div>
                 </div>
 
-                {/* AI Diagnostic Findings */}
                 <div>
-                  <h3 className="font-['Outfit'] font-bold text-sm text-zinc-900 uppercase tracking-wider mb-2">
-                    Diagnostic Analysis & Problem Statement
+                  <h3 className="font-['Outfit'] font-bold text-sm text-zinc-900 uppercase tracking-wider mb-1.5">
+                    Engineering Fault Assessment
                   </h3>
-                  <div className="p-3.5 rounded-xl border-l-4 border-black bg-zinc-50">
-                    <p className="text-zinc-800 leading-relaxed font-medium">
-                      {activeWorkOrder.diagnosis}
-                    </p>
-                  </div>
+                  <p className="text-zinc-700 bg-amber-50/50 p-3 rounded-xl border border-amber-200/40 leading-relaxed">
+                    {activeWorkOrder.diagnosis}
+                  </p>
                 </div>
 
-                {/* Required Spare Parts */}
                 <div>
                   <h3 className="font-['Outfit'] font-bold text-sm text-zinc-900 uppercase tracking-wider mb-2">
-                    Required OEM Replacement Parts & Consumables
+                    Required Spare Parts & Consumables
                   </h3>
                   <ul className="space-y-1.5">
                     {activeWorkOrder.requiredParts.map((part, i) => (
@@ -855,7 +1194,6 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                   </ul>
                 </div>
 
-                {/* Technician Safety & Verification Checklist */}
                 <div>
                   <h3 className="font-['Outfit'] font-bold text-sm text-zinc-900 uppercase tracking-wider mb-2">
                     Lockout / Tagout (LOTO) & Operational Checklist
@@ -863,14 +1201,13 @@ Could you provide more context, such as the specific machine model (e.g., Haas V
                   <div className="space-y-2">
                     {activeWorkOrder.checklist.map((item, i) => (
                       <label key={i} className="flex items-center gap-2.5 p-2 rounded-lg hover:bg-zinc-50 cursor-pointer">
-                        <input type="checkbox" defaultChecked={i === 0} className="rounded accent-black h-4 w-4" />
+                        <input type="checkbox" defaultChecked={i === 0} className="rounded-sm accent-black h-4 w-4" />
                         <span className="text-zinc-800">{item}</span>
                       </label>
                     ))}
                   </div>
                 </div>
 
-                {/* Sign-off Block */}
                 <div className="pt-6 border-t border-black/[0.08] grid grid-cols-2 gap-6">
                   <div>
                     <span className="text-[11px] text-zinc-400 block mb-3">Lead Technician Signature</span>
